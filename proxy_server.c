@@ -163,71 +163,123 @@ int handle_request(int clientSocketId, ParsedRequest *request, char *tempReq)
     strcat(buf, request->path);
     strcat(buf, " ");
     strcat(buf, request->version);
-    strcat(buf, "\r\n");
+    strcat(buf, "\r\n\r\n");
     size_t len = strlen(buf);
 
-    if (ParsedHeader_set(request, "Connection", "close") < 0)
+    // Cache lookup
+    struct cache_element *temp = find(tempReq);
+    if (temp != NULL)
     {
-        printf("Set Connection header key is not working");
-    }
+        printf("Cache hit: Returning cached data for URL: %s\n", tempReq); // Cache hit
+        int size = temp->len / sizeof(char);
+        int pos = 0;
+        char response[MAX_BYTES];
 
-    if (ParsedHeader_get(request, "Host") == NULL)
-    {
-        if (ParsedHeader_set(request, "Host", request->host) < 0)
+        while (pos < size)
         {
-            printf("Set Host header key is not working");
+            bzero(response, MAX_BYTES);
+            for (int i = 0; i < MAX_BYTES; i++)
+            {
+                if (pos < size)
+                {
+                    response[i] = temp->data[pos];
+                    pos++;
+                }
+            }
+            send(clientSocketId, response, MAX_BYTES, 0);
         }
+
+        printf("Data retrieved from cache\n");
+        printf("%s\n\n", response);
     }
-
-    if (ParsedRequest_unparse_headers(request, buf + len, (size_t)MAX_BYTES - len < 0))
+    else
     {
-        printf("unparse failed");
-    }
+        printf("Cache miss: Requesting from remote server for URL: %s\n", tempReq); // Cache miss
 
-    int server_port = 80;
-    if (request->port != NULL)
-    {
-        server_port = atoi(request->port);
-    }
-
-    int remoteSocketId = connectRemoteServer(request->host, server_port);
-
-    if (remoteSocketId < 0)
-    {
-        return -1;
-    }
-
-    int bytes_send = send(remoteSocketId, buf, strlen(buf), 0);
-    bzero(buf, MAX_BYTES);
-
-    bytes_send = recv(remoteSocketId, buf, MAX_BYTES - 1, 0);
-    char *temp_buffer = (char *)malloc(sizeof(char) * MAX_BYTES);
-    int temp_buffer_size = MAX_BYTES;
-    int temp_buffer_index = 0;
-
-    while (bytes_send > 0)
-    {
-        bytes_send = send(clientSocketId, buf, bytes_send, 0);
-        for (int i = 0; i < bytes_send / sizeof(char); i++)
+        // Add headers to the request
+        if (ParsedHeader_set(request, "Connection", "close") < 0)
         {
-            temp_buffer[temp_buffer_index] = buf[i];
-            temp_buffer_index++;
+            printf("Set Connection header key is not working\n");
         }
-        temp_buffer_size += MAX_BYTES;
-        temp_buffer = (char *)realloc(temp_buffer, temp_buffer_size);
+
+        if (ParsedHeader_get(request, "Host") == NULL)
+        {
+            if (ParsedHeader_set(request, "Host", request->host) < 0)
+            {
+                printf("Set Host header key is not working\n");
+            }
+        }
+
+        // Send the request to the remote server
+        int server_port = 80;
+        if (request->port != NULL)
+        {
+            server_port = atoi(request->port);
+        }
+
+        int remoteSocketId = connectRemoteServer(request->host, server_port);
+
+        if (remoteSocketId < 0)
+        {
+            printf("Failed to connect to remote server\n");
+            free(buf);
+            return -1;
+        }
+
+        printf("Final Request Sent to Server:\n%s\n", buf);
+        int bytes_send = send(remoteSocketId, buf, strlen(buf), 0);
+
         if (bytes_send < 0)
         {
-            perror("Error in sending data to the client\n");
-            break;
+            printf("Error in sending data to the server\n");
+            free(buf);
+            close(remoteSocketId);
+            return -1;
         }
+
         bzero(buf, MAX_BYTES);
+
+        // Receive the response from the remote server and send it to the client
         bytes_send = recv(remoteSocketId, buf, MAX_BYTES - 1, 0);
+        char *temp_buffer = (char *)malloc(sizeof(char) * MAX_BYTES);
+        int temp_buffer_size = MAX_BYTES;
+        int temp_buffer_index = 0;
+
+        while (bytes_send > 0)
+        {
+            bytes_send = send(clientSocketId, buf, bytes_send, 0);
+            for (int i = 0; i < bytes_send / sizeof(char); i++)
+            {
+                temp_buffer[temp_buffer_index] = buf[i];
+                temp_buffer_index++;
+            }
+            temp_buffer_size += MAX_BYTES;
+            temp_buffer = (char *)realloc(temp_buffer, temp_buffer_size);
+
+            if (bytes_send < 0)
+            {
+                perror("Error in sending data to the client\n");
+                break;
+            }
+
+            bzero(buf, MAX_BYTES);
+            bytes_send = recv(remoteSocketId, buf, MAX_BYTES - 1, 0);
+        }
+
+        temp_buffer[temp_buffer_index] = '\0';
+
+        // Add the response to the cache
+        add_cache_element(temp_buffer, strlen(temp_buffer), tempReq);
+
+        printf("Added to cache for URL: %s\n", tempReq);
+        free(temp_buffer);
+
+        // Close the connection to the remote server
+        close(remoteSocketId);
     }
-    temp_buffer[temp_buffer_index] = '\0';
+
+    // Clean up and return
     free(buf);
-    add_cache_element(temp_buffer, strlen(temp_buffer), tempReq);
-    free(temp_buffer);
-    close(remoteSocketId);
     return 0;
 }
 
@@ -300,7 +352,7 @@ void *thread_fn(void *socketNew)
             send(socket, response, MAX_BYTES, 0);
         }
         printf("Data retrieved from the cache\n");
-        printf("% s\n\n", response);
+        printf("%s\n\n", response);
     }
     else if (bytes_send_client > 0)
     {
@@ -391,7 +443,7 @@ int main(int argc, char *argv[])
     server_addr.sin_port = htons(port_number);
     server_addr.sin_addr.s_addr = INADDR_ANY;
 
-    if (bind(proxy_socketId, (struct sockaddr *)&server_addr, sizeof(server_addr) < 0))
+    if (bind(proxy_socketId, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0)
     {
         perror("Port not available\n");
         exit(1);
@@ -439,26 +491,28 @@ cache_element *find(char *url)
     cache_element *site = NULL;
     int temp_lock_val = pthread_mutex_lock(&lock);
     printf("Remove from cache Lock acquired %d\n", temp_lock_val);
+
     if (head != NULL)
     {
         site = head;
         while (site != NULL)
         {
+            printf("Comparing cache url: %s with requested url: %s\n", site->url, url); // Debugging line
             if (!strcmp(site->url, url))
             {
-                printf("LRU time track before:%ld", site->lru_time_track);
-                printf("\n url found \n");
-                site->lru_time_track = time(NULL);
-                printf("LRU time track after:%ld", site->lru_time_track);
+                printf("Cache hit for url: %s\n", url); // Cache hit
+                site->lru_time_track = time(NULL);      // Update LRU time track
                 break;
             }
             site = site->next;
         }
     }
-    else
+
+    if (site == NULL)
     {
-        printf("url not found\n");
+        printf("Cache miss for url: %s\n", url); // Cache miss
     }
+
     temp_lock_val = pthread_mutex_unlock(&lock);
     printf("Lock is unlocked\n");
     return site;
@@ -466,9 +520,9 @@ cache_element *find(char *url)
 
 void remove_cache_element()
 {
-    cache_element *p;
-    cache_element *q;
-    cache_element *temp;
+    cache_element *p = NULL;
+    cache_element *q = NULL;
+    cache_element *temp = head;
 
     int temp_lock_val = pthread_mutex_lock(&lock);
     printf("Lock is acquired\n");
@@ -483,7 +537,7 @@ void remove_cache_element()
                 p = q;
             }
         }
-        if (temp = head)
+        if (temp == head)
         {
             head = head->next;
         }
@@ -505,6 +559,7 @@ int add_cache_element(char *data, int size, char *url)
 {
     int temp_lock_val = pthread_mutex_lock(&lock);
     printf("Add Cache Lock Acquired %d\n", temp_lock_val);
+
     int element_size = size + 1 + strlen(url) + sizeof(cache_element);
     if (element_size > MAX_ELEMENT_SIZE)
     {
@@ -518,6 +573,7 @@ int add_cache_element(char *data, int size, char *url)
         {
             remove_cache_element();
         }
+
         cache_element *element = (cache_element *)malloc(sizeof(cache_element));
         element->data = (char *)malloc(size + 1);
         strcpy(element->data, data);
@@ -528,9 +584,11 @@ int add_cache_element(char *data, int size, char *url)
         element->len = size;
         head = element;
         cache_size += element_size;
+
+        printf("Added to cache: URL: %s, Size: %d, Cache Size: %d\n", url, size, cache_size); // Debugging line
+
         temp_lock_val = pthread_mutex_unlock(&lock);
-        printf("Add cache element lock unlocked\n");
+        printf("Add Cache Lock Unlocked %d\n", temp_lock_val);
         return 1;
     }
-    return 0;
 }
