@@ -78,7 +78,7 @@ The server listens for incoming client requests, retrieves the data from the tar
 - On the **first visit**, the cache will **miss** and the data will be fetched from the server.
 - On **subsequent visits**, the data will be served **from the cache**, improving response time.
 
-![Cache Demo](https://github.com/Lovepreet-Singh-LPSK/MultiThreadedProxyServerClient/blob/main/pics/cache.png)
+
 
 ---
 
